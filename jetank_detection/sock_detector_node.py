@@ -30,7 +30,8 @@ import time
 import rclpy
 from cv_bridge import CvBridge
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
-from rclpy.executors import SingleThreadedExecutor
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.lifecycle import LifecycleNode, TransitionCallbackReturn
 from sensor_msgs.msg import Image
 from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
@@ -118,9 +119,11 @@ class SockDetectorNode(LifecycleNode):
                 Image, debug_image_topic, 10
             )
 
-        # Create action server
+        # Create action server with ReentrantCallbackGroup so its callback
+        # can run concurrently with subscriptions on the MultiThreadedExecutor.
         from jetank_detection.action import DetectSocks  # noqa: PLC0415
 
+        _action_cbg = ReentrantCallbackGroup()
         self._action_server = ActionServer(
             self,
             DetectSocks,
@@ -128,6 +131,7 @@ class SockDetectorNode(LifecycleNode):
             execute_callback=self._execute_callback,
             goal_callback=self._goal_callback,
             cancel_callback=self._cancel_callback,
+            callback_group=_action_cbg,
         )
 
         self.get_logger().info("SockDetectorNode configured.")
@@ -174,6 +178,10 @@ class SockDetectorNode(LifecycleNode):
         if self._action_server is not None:
             self._action_server.destroy()
             self._action_server = None
+        # Guard against cleanup reached without a preceding deactivate
+        if self._continuous_sub is not None:
+            self.destroy_subscription(self._continuous_sub)
+            self._continuous_sub = None
         self._backend = None
         self._latest_image = None
         return TransitionCallbackReturn.SUCCESS
@@ -184,16 +192,23 @@ class SockDetectorNode(LifecycleNode):
         if self._action_server is not None:
             self._action_server.destroy()
             self._action_server = None
+        if self._continuous_sub is not None:
+            self.destroy_subscription(self._continuous_sub)
+            self._continuous_sub = None
         return TransitionCallbackReturn.SUCCESS
 
     # ------------------------------------------------------------------
     # Continuous mode
     # ------------------------------------------------------------------
 
-    def _continuous_image_callback(self, msg: Image) -> None:
-        """Process and publish detections for every incoming frame."""
+    def _store_latest(self, msg: Image) -> None:
+        """Store the most recent image message under the image lock."""
         with self._image_lock:
             self._latest_image = msg
+
+    def _continuous_image_callback(self, msg: Image) -> None:
+        """Process and publish detections for every incoming frame."""
+        self._store_latest(msg)
 
         if self._backend is None:
             return
@@ -207,7 +222,7 @@ class SockDetectorNode(LifecycleNode):
         conf = self.get_parameter("confidence").get_parameter_value().double_value
         try:
             detections = self._backend.infer(image_bgr, conf_threshold=conf)
-        except RuntimeError as exc:
+        except Exception as exc:  # noqa: BLE001
             self.get_logger().warn(f"Inference skipped: {exc}")
             return
 
@@ -216,10 +231,13 @@ class SockDetectorNode(LifecycleNode):
             self._det_pub.publish(det_array)
 
         if self._debug_pub is not None and self._debug_pub.is_activated:
-            debug_img = self._draw_detections(image_bgr, detections)
-            debug_msg = self._bridge.cv2_to_imgmsg(debug_img, encoding="bgr8")
-            debug_msg.header = msg.header
-            self._debug_pub.publish(debug_msg)
+            try:
+                debug_img = self._draw_detections(image_bgr, detections)
+                debug_msg = self._bridge.cv2_to_imgmsg(debug_img, encoding="bgr8")
+                debug_msg.header = msg.header
+                self._debug_pub.publish(debug_msg)
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().warn(f"Debug image publish failed: {exc}")
 
     # ------------------------------------------------------------------
     # Action server
@@ -251,72 +269,82 @@ class SockDetectorNode(LifecycleNode):
             f"(timeout={timeout}s, min_conf={min_conf})"
         )
 
-        # Collect frames via a short-lived subscription
-        collected_images = []
-        frame_lock = threading.Lock()
+        continuous = self.get_parameter("continuous").get_parameter_value().bool_value
 
-        def _frame_callback(msg: Image) -> None:
-            with frame_lock:
-                collected_images.append(msg)
-
-        sub = self.create_subscription(Image, topic, _frame_callback, 1)
+        # In continuous mode the persistent subscription already feeds
+        # _latest_image via _store_latest; in on-demand mode we create a
+        # temporary subscription in a ReentrantCallbackGroup so that it fires
+        # concurrently with this action callback on the MultiThreadedExecutor.
+        tmp_sub = None
+        if not continuous:
+            cbg = ReentrantCallbackGroup()
+            tmp_sub = self.create_subscription(
+                Image, topic, self._store_latest, 1, callback_group=cbg
+            )
 
         deadline = time.monotonic() + timeout
         frames_processed = 0
         feedback_msg = DetectSocks.Feedback()
-
-        # Wait for frames
-        while frames_processed < n_frames and time.monotonic() < deadline:
-            if goal_handle.is_cancel_requested:
-                goal_handle.canceled()
-                self.destroy_subscription(sub)
-                return DetectSocks.Result()
-
-            with frame_lock:
-                if len(collected_images) > frames_processed:
-                    frames_processed = len(collected_images)
-                    feedback_msg.frames_processed = frames_processed
-                    goal_handle.publish_feedback(feedback_msg)
-
-            time.sleep(0.05)
-
-        self.destroy_subscription(sub)
-
-        # Run inference on collected frames
         best_detections = []
         best_score = 0.0
         best_header = None
+        last_stamp = None  # deduplicate consecutive identical frames
 
-        with frame_lock:
-            frames_to_process = list(collected_images[:n_frames])
+        try:
+            while frames_processed < n_frames and time.monotonic() < deadline:
+                if goal_handle.is_cancel_requested:
+                    goal_handle.canceled()
+                    return DetectSocks.Result()
 
-        if self._backend is None:
-            goal_handle.succeed()
-            result = DetectSocks.Result()
-            result.found = False
-            result.confidence = 0.0
-            result.best = Detection2DArray()
-            return result
+                with self._image_lock:
+                    current_msg = self._latest_image
 
-        for msg in frames_to_process:
-            try:
-                image_bgr = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-            except Exception as exc:  # noqa: BLE001
-                self.get_logger().warn(f"Frame conversion failed: {exc}")
-                continue
+                if current_msg is None:
+                    time.sleep(0.01)
+                    continue
 
-            try:
-                dets = self._backend.infer(image_bgr, conf_threshold=min_conf)
-            except RuntimeError as exc:
-                self.get_logger().warn(f"Inference skipped: {exc}")
-                continue
+                # Deduplicate: skip if we already processed this stamp
+                stamp = (current_msg.header.stamp.sec, current_msg.header.stamp.nanosec)
+                if stamp == last_stamp:
+                    time.sleep(0.01)
+                    continue
 
-            if dets:
-                frame_best = max(dets, key=lambda d: d.score)
-                if frame_best.score > best_score:
-                    best_score = frame_best.score
-                    best_detections = dets
-                    best_header = msg.header
+                last_stamp = stamp
+
+                if self._backend is None:
+                    time.sleep(0.01)
+                    continue
+
+                try:
+                    image_bgr = self._bridge.imgmsg_to_cv2(
+                        current_msg, desired_encoding="bgr8"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self.get_logger().warn(f"Frame conversion failed: {exc}")
+                    time.sleep(0.01)
+                    continue
+
+                try:
+                    dets = self._backend.infer(image_bgr, conf_threshold=min_conf)
+                except Exception as exc:  # noqa: BLE001
+                    self.get_logger().warn(f"Inference skipped: {exc}")
+                    time.sleep(0.01)
+                    continue
+
+                frames_processed += 1
+                feedback_msg.frames_processed = frames_processed
+                goal_handle.publish_feedback(feedback_msg)
+
+                if dets:
+                    frame_best = max(dets, key=lambda d: d.score)
+                    if frame_best.score > best_score:
+                        best_score = frame_best.score
+                        best_detections = dets
+                        best_header = current_msg.header
+
+        finally:
+            if tmp_sub is not None:
+                self.destroy_subscription(tmp_sub)
 
         # Build result
         result = DetectSocks.Result()
@@ -386,7 +414,7 @@ def main(args=None):
     """Run the sock_detector_node as a lifecycle node."""
     rclpy.init(args=args)
     node = SockDetectorNode()
-    executor = SingleThreadedExecutor()
+    executor = MultiThreadedExecutor()
     executor.add_node(node)
     try:
         executor.spin()
