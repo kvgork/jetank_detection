@@ -1,0 +1,31 @@
+sock_detector:
+  ros__parameters:
+    # Path to the YOLO model file (.pt for Stage 1 PyTorch, .engine for Stage 2 TensorRT).
+    # Leave empty to start the node without inference capability.
+    model_path: ""
+
+    # Input image topic (left stereo camera)
+    input_image_topic: "/stereo_camera/left/image_raw"
+
+    # Detection confidence threshold (0.0–1.0)
+    confidence: 0.5
+
+    # Number of frames to process per DetectSocks action goal (on-demand mode)
+    n_frames: 10
+
+    # Timeout in seconds for on-demand action (overridden by goal.timeout)
+    # (used only for reference; actual timeout comes from the action goal)
+
+    # If true, subscribe to input_image_topic and publish detections every frame
+    # while the node is active (continuous / live-publisher mode).
+    # If false (default), only run inference when a DetectSocks action is called.
+    continuous: false
+
+    # If true, publish an annotated debug image on debug_image_topic
+    debug: true
+
+    # Output topic for Detection2DArray
+    detections_topic: "/detections/socks"
+
+    # Output topic for annotated debug image (used when debug: true)
+    debug_image_topic: "/detections/socks/debug"

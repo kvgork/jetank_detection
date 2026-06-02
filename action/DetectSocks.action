@@ -1,0 +1,12 @@
+# Goal
+float32 timeout
+float32 min_confidence
+int32 n_frames
+---
+# Result
+vision_msgs/Detection2DArray best
+float32 confidence
+bool found
+---
+# Feedback
+int32 frames_processed

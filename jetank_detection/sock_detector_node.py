@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+"""
+Sock detector lifecycle node for the JeTank robot.
+
+This node wraps the YOLO-based sock detector as a ROS 2 lifecycle node with a
+DetectSocks action server.  The model engine is loaded once at on_configure
+and stays GPU-resident; the heavy inference only runs while the node is active.
+
+Lifecycle transitions::
+
+    ros2 lifecycle set /sock_detector configure
+    ros2 lifecycle set /sock_detector activate
+    # call the action or observe /detections/socks
+    ros2 lifecycle set /sock_detector deactivate
+    ros2 lifecycle set /sock_detector cleanup
+
+DetectSocks action (on-demand mode)::
+
+    ros2 action send_goal /detect_socks jetank_detection/action/DetectSocks \
+        '{timeout: 5.0, min_confidence: 0.5, n_frames: 10}'
+
+Continuous mode (live publisher)::
+
+    ros2 launch jetank_detection detect.launch.py continuous:=true
+"""
+
+import threading
+import time
+
+import rclpy
+from cv_bridge import CvBridge
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.executors import SingleThreadedExecutor
+from rclpy.lifecycle import LifecycleNode, TransitionCallbackReturn
+from sensor_msgs.msg import Image
+from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
+
+from jetank_detection.backends import make_backend
+
+
+class SockDetectorNode(LifecycleNode):
+    """
+    Lifecycle node that exposes a DetectSocks action server.
+
+    Parameters (declared in on_configure)
+    --------------------------------------
+    model_path          : str   path to the .pt/.engine model file
+    input_image_topic   : str   left camera topic
+    confidence          : float detection confidence threshold (default 0.5)
+    n_frames            : int   frames to process in on-demand action (default 10)
+    continuous          : bool  if true, subscribe and publish every frame when active
+    debug               : bool  publish annotated debug image (default true)
+    detections_topic    : str   topic for Detection2DArray output
+    debug_image_topic   : str   topic for debug annotated image
+    """
+
+    def __init__(self) -> None:
+        """Initialise the lifecycle node."""
+        super().__init__("sock_detector")
+        self._bridge = CvBridge()
+        self._backend = None
+        self._action_server = None
+        self._continuous_sub = None
+        self._det_pub = None
+        self._debug_pub = None
+        self._latest_image = None
+        self._image_lock = threading.Lock()
+
+    # ------------------------------------------------------------------
+    # Lifecycle callbacks
+    # ------------------------------------------------------------------
+
+    def on_configure(self, state):
+        """Configure the node: create backend, publishers and action server."""
+        self.get_logger().info("Configuring SockDetectorNode...")
+
+        # Declare parameters
+        self.declare_parameter("model_path", "")
+        self.declare_parameter("input_image_topic", "/stereo_camera/left/image_raw")
+        self.declare_parameter("confidence", 0.5)
+        self.declare_parameter("n_frames", 10)
+        self.declare_parameter("continuous", False)
+        self.declare_parameter("debug", True)
+        self.declare_parameter("detections_topic", "/detections/socks")
+        self.declare_parameter("debug_image_topic", "/detections/socks/debug")
+
+        model_path = self.get_parameter("model_path").get_parameter_value().string_value
+        detections_topic = (
+            self.get_parameter("detections_topic").get_parameter_value().string_value
+        )
+        debug_image_topic = (
+            self.get_parameter("debug_image_topic").get_parameter_value().string_value
+        )
+        debug = self.get_parameter("debug").get_parameter_value().bool_value
+
+        # Create backend
+        self._backend = make_backend("ultralytics")
+
+        if model_path:
+            try:
+                self._backend.load(model_path)
+                self.get_logger().info(f"Model loaded from {model_path}")
+            except RuntimeError as exc:
+                self.get_logger().error(f"Failed to load model: {exc}")
+                # Don't crash — node starts without inference capability
+        else:
+            self.get_logger().warn(
+                "no model_path set — node will start but cannot infer until "
+                "configured with a model"
+            )
+
+        # Create lifecycle publishers
+        self._det_pub = self.create_lifecycle_publisher(
+            Detection2DArray, detections_topic, 10
+        )
+        if debug:
+            self._debug_pub = self.create_lifecycle_publisher(
+                Image, debug_image_topic, 10
+            )
+
+        # Create action server
+        from jetank_detection.action import DetectSocks  # noqa: PLC0415
+
+        self._action_server = ActionServer(
+            self,
+            DetectSocks,
+            "detect_socks",
+            execute_callback=self._execute_callback,
+            goal_callback=self._goal_callback,
+            cancel_callback=self._cancel_callback,
+        )
+
+        self.get_logger().info("SockDetectorNode configured.")
+        return TransitionCallbackReturn.SUCCESS
+
+    def on_activate(self, state):
+        """Activate publishers and optionally start the continuous subscriber."""
+        self.get_logger().info("Activating SockDetectorNode...")
+
+        # Activate publishers
+        self._det_pub.on_activate(self.get_current_state())
+        if self._debug_pub is not None:
+            self._debug_pub.on_activate(self.get_current_state())
+
+        continuous = self.get_parameter("continuous").get_parameter_value().bool_value
+        if continuous:
+            topic = (
+                self.get_parameter("input_image_topic").get_parameter_value().string_value
+            )
+            self._continuous_sub = self.create_subscription(
+                Image, topic, self._continuous_image_callback, 1
+            )
+            self.get_logger().info(f"Continuous mode enabled: subscribing to {topic}")
+
+        return TransitionCallbackReturn.SUCCESS
+
+    def on_deactivate(self, state):
+        """Deactivate publishers and destroy the continuous subscriber."""
+        self.get_logger().info("Deactivating SockDetectorNode...")
+
+        if self._continuous_sub is not None:
+            self.destroy_subscription(self._continuous_sub)
+            self._continuous_sub = None
+
+        self._det_pub.on_deactivate(self.get_current_state())
+        if self._debug_pub is not None:
+            self._debug_pub.on_deactivate(self.get_current_state())
+
+        return TransitionCallbackReturn.SUCCESS
+
+    def on_cleanup(self, state):
+        """Clean up the backend and action server."""
+        self.get_logger().info("Cleaning up SockDetectorNode...")
+        if self._action_server is not None:
+            self._action_server.destroy()
+            self._action_server = None
+        self._backend = None
+        self._latest_image = None
+        return TransitionCallbackReturn.SUCCESS
+
+    def on_shutdown(self, state):
+        """Shut down the node and destroy the action server."""
+        self.get_logger().info("Shutting down SockDetectorNode...")
+        if self._action_server is not None:
+            self._action_server.destroy()
+            self._action_server = None
+        return TransitionCallbackReturn.SUCCESS
+
+    # ------------------------------------------------------------------
+    # Continuous mode
+    # ------------------------------------------------------------------
+
+    def _continuous_image_callback(self, msg: Image) -> None:
+        """Process and publish detections for every incoming frame."""
+        with self._image_lock:
+            self._latest_image = msg
+
+        if self._backend is None:
+            return
+
+        try:
+            image_bgr = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(f"cv_bridge conversion failed: {exc}")
+            return
+
+        conf = self.get_parameter("confidence").get_parameter_value().double_value
+        try:
+            detections = self._backend.infer(image_bgr, conf_threshold=conf)
+        except RuntimeError as exc:
+            self.get_logger().warn(f"Inference skipped: {exc}")
+            return
+
+        det_array = self._build_detection_array(detections, msg.header)
+        if self._det_pub is not None and self._det_pub.is_activated:
+            self._det_pub.publish(det_array)
+
+        if self._debug_pub is not None and self._debug_pub.is_activated:
+            debug_img = self._draw_detections(image_bgr, detections)
+            debug_msg = self._bridge.cv2_to_imgmsg(debug_img, encoding="bgr8")
+            debug_msg.header = msg.header
+            self._debug_pub.publish(debug_msg)
+
+    # ------------------------------------------------------------------
+    # Action server
+    # ------------------------------------------------------------------
+
+    def _goal_callback(self, goal_request):
+        """Accept all incoming DetectSocks goals."""
+        self.get_logger().info("DetectSocks goal received.")
+        return GoalResponse.ACCEPT
+
+    def _cancel_callback(self, goal_handle):
+        """Accept cancel requests for DetectSocks goals."""
+        self.get_logger().info("DetectSocks goal cancel requested.")
+        return CancelResponse.ACCEPT
+
+    def _execute_callback(self, goal_handle):
+        """Collect up to n_frames and return the best detection."""
+        from jetank_detection.action import DetectSocks  # noqa: PLC0415
+
+        goal = goal_handle.request
+        n_frames: int = goal.n_frames if goal.n_frames > 0 else 10
+        timeout: float = goal.timeout if goal.timeout > 0 else 5.0
+        min_conf: float = goal.min_confidence if goal.min_confidence > 0 else 0.5
+
+        topic = self.get_parameter("input_image_topic").get_parameter_value().string_value
+
+        self.get_logger().info(
+            f"DetectSocks: collecting {n_frames} frames on {topic} "
+            f"(timeout={timeout}s, min_conf={min_conf})"
+        )
+
+        # Collect frames via a short-lived subscription
+        collected_images = []
+        frame_lock = threading.Lock()
+
+        def _frame_callback(msg: Image) -> None:
+            with frame_lock:
+                collected_images.append(msg)
+
+        sub = self.create_subscription(Image, topic, _frame_callback, 1)
+
+        deadline = time.monotonic() + timeout
+        frames_processed = 0
+        feedback_msg = DetectSocks.Feedback()
+
+        # Wait for frames
+        while frames_processed < n_frames and time.monotonic() < deadline:
+            if goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+                self.destroy_subscription(sub)
+                return DetectSocks.Result()
+
+            with frame_lock:
+                if len(collected_images) > frames_processed:
+                    frames_processed = len(collected_images)
+                    feedback_msg.frames_processed = frames_processed
+                    goal_handle.publish_feedback(feedback_msg)
+
+            time.sleep(0.05)
+
+        self.destroy_subscription(sub)
+
+        # Run inference on collected frames
+        best_detections = []
+        best_score = 0.0
+        best_header = None
+
+        with frame_lock:
+            frames_to_process = list(collected_images[:n_frames])
+
+        if self._backend is None:
+            goal_handle.succeed()
+            result = DetectSocks.Result()
+            result.found = False
+            result.confidence = 0.0
+            result.best = Detection2DArray()
+            return result
+
+        for msg in frames_to_process:
+            try:
+                image_bgr = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().warn(f"Frame conversion failed: {exc}")
+                continue
+
+            try:
+                dets = self._backend.infer(image_bgr, conf_threshold=min_conf)
+            except RuntimeError as exc:
+                self.get_logger().warn(f"Inference skipped: {exc}")
+                continue
+
+            if dets:
+                frame_best = max(dets, key=lambda d: d.score)
+                if frame_best.score > best_score:
+                    best_score = frame_best.score
+                    best_detections = dets
+                    best_header = msg.header
+
+        # Build result
+        result = DetectSocks.Result()
+        if best_detections and best_header is not None:
+            det_array = self._build_detection_array(best_detections, best_header)
+            result.best = det_array
+            result.confidence = best_score
+            result.found = True
+        else:
+            result.best = Detection2DArray()
+            result.confidence = 0.0
+            result.found = False
+
+        self.get_logger().info(
+            f"DetectSocks done: found={result.found}, confidence={result.confidence:.3f}, "
+            f"frames_processed={frames_processed}"
+        )
+        goal_handle.succeed()
+        return result
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _build_detection_array(self, detections, header) -> Detection2DArray:
+        """Convert a list of :class:`Detection` to a Detection2DArray message."""
+        array = Detection2DArray()
+        array.header = header
+
+        for det in detections:
+            d2d = Detection2D()
+            d2d.header = header
+            d2d.bbox.center.position.x = det.cx
+            d2d.bbox.center.position.y = det.cy
+            d2d.bbox.size_x = det.w
+            d2d.bbox.size_y = det.h
+
+            hyp = ObjectHypothesisWithPose()
+            hyp.hypothesis.class_id = det.label
+            hyp.hypothesis.score = det.score
+            d2d.results.append(hyp)
+
+            array.detections.append(d2d)
+
+        return array
+
+    def _draw_detections(self, image_bgr, detections):
+        """Draw bounding boxes on *image_bgr* and return the annotated image."""
+        import cv2  # noqa: PLC0415
+
+        img = image_bgr.copy()
+        for det in detections:
+            x1 = int(det.cx - det.w / 2)
+            y1 = int(det.cy - det.h / 2)
+            x2 = int(det.cx + det.w / 2)
+            y2 = int(det.cy + det.h / 2)
+            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            label = f"{det.label} {det.score:.2f}"
+            cv2.putText(
+                img, label, (x1, y1 - 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1
+            )
+        return img
+
+
+def main(args=None):
+    """Run the sock_detector_node as a lifecycle node."""
+    rclpy.init(args=args)
+    node = SockDetectorNode()
+    executor = SingleThreadedExecutor()
+    executor.add_node(node)
+    try:
+        executor.spin()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()
