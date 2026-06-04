@@ -1,8 +1,22 @@
 sock_detector:
   ros__parameters:
-    # Path to the YOLO model file (.pt for Stage 1 PyTorch, .engine for Stage 2 TensorRT).
-    # Leave empty to start the node without inference capability.
+    # Environment selector. Sim and real need DIFFERENT models because the
+    # synthetic Gazebo imagery differs from real camera frames (see plan §2a).
+    # When sim: true the node loads model_path_sim; otherwise model_path_real.
+    # The launch wrappers set this for you: detect_sim.launch.py -> true,
+    # detect_real.launch.py -> false.
+    sim: false
+
+    # Explicit model path (.pt for Stage 1 PyTorch, .engine for Stage 2 TensorRT).
+    # If non-empty this OVERRIDES the sim/real selection below. Leave empty to
+    # let the `sim` flag pick model_path_sim / model_path_real.
     model_path: ""
+
+    # Model trained on Gazebo/sim imagery — loaded when sim: true.
+    model_path_sim: ""
+
+    # Model trained on real camera frames — loaded when sim: false.
+    model_path_real: ""
 
     # Input image topic (left stereo camera)
     input_image_topic: "/stereo_camera/left/image_raw"

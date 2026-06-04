@@ -31,10 +31,25 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     """Generate the sock detector launch description."""
+    declare_sim = DeclareLaunchArgument(
+        "sim",
+        default_value="false",
+        description="If true, load the sim model (model_path_sim); else the real one",
+    )
     declare_model_path = DeclareLaunchArgument(
         "model_path",
         default_value="",
-        description="Path to the YOLO model file (.pt or .engine)",
+        description="Explicit YOLO model path (.pt/.engine); overrides sim/real selection",
+    )
+    declare_model_path_sim = DeclareLaunchArgument(
+        "model_path_sim",
+        default_value="",
+        description="Model to load when sim:=true (trained on Gazebo imagery)",
+    )
+    declare_model_path_real = DeclareLaunchArgument(
+        "model_path_real",
+        default_value="",
+        description="Model to load when sim:=false (trained on real camera frames)",
     )
     declare_continuous = DeclareLaunchArgument(
         "continuous",
@@ -68,7 +83,10 @@ def generate_launch_description():
         name="sock_detector",
         parameters=[
             {
+                "sim": LaunchConfiguration("sim"),
                 "model_path": LaunchConfiguration("model_path"),
+                "model_path_sim": LaunchConfiguration("model_path_sim"),
+                "model_path_real": LaunchConfiguration("model_path_real"),
                 "continuous": LaunchConfiguration("continuous"),
                 "confidence": LaunchConfiguration("confidence"),
                 "debug": LaunchConfiguration("debug"),
@@ -81,7 +99,10 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
+            declare_sim,
             declare_model_path,
+            declare_model_path_sim,
+            declare_model_path_real,
             declare_continuous,
             declare_confidence,
             declare_debug,

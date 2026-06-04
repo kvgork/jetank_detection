@@ -47,6 +47,23 @@ python3 -c "from ultralytics import YOLO; print('OK')"
 
 ## Running
 
+### Sim vs real models
+
+Detection in Gazebo and on the real robot are different visual domains, so the
+pipeline uses **two models** and picks one at runtime from the explicit `sim`
+flag (not `use_sim_time`):
+
+- `sim:=true`  → loads `model_path_sim` (trained on Gazebo imagery)
+- `sim:=false` → loads `model_path_real` (trained on real camera frames)
+- `model_path:=...` overrides the selection for one-off testing.
+
+Two launch entry points wrap the base `detect.launch.py` and pin the flag:
+
+| Entry point | `sim` | Default mode | Use |
+|-------------|-------|--------------|-----|
+| `detect_sim.launch.py`  | `true`  | continuous (live) | Gazebo / `sim_demo` |
+| `detect_real.launch.py` | `false` | on-demand (action) | physical robot |
+
 ### 1. Build
 
 ```bash
@@ -56,12 +73,12 @@ pixi run build
 pixi run -- colcon build --symlink-install --packages-select jetank_detection
 ```
 
-### 2. Lifecycle node (on-demand mode, default)
+### 2. Real robot — on-demand (default)
 
 ```bash
-# Terminal 1 — launch the node
+# Terminal 1 — launch the real entry point (sim:=false)
 source install/setup.bash
-ros2 launch jetank_detection detect.launch.py model_path:=/path/to/sock.pt
+ros2 launch jetank_detection detect_real.launch.py model_path_real:=/path/to/sock_real.pt
 
 # Terminal 2 — configure and activate
 ros2 lifecycle set /sock_detector configure
@@ -72,16 +89,17 @@ ros2 action send_goal /detect_socks jetank_detection/action/DetectSocks \
     '{timeout: 5.0, min_confidence: 0.5, n_frames: 10}'
 ```
 
-### 3. Continuous (live publisher) mode
+### 3. Sim — continuous (live publisher)
 
 ```bash
-ros2 launch jetank_detection detect.launch.py \
-    model_path:=/path/to/sock.pt \
-    continuous:=true
+ros2 launch jetank_detection detect_sim.launch.py model_path_sim:=/path/to/sock_sim.pt
 ros2 lifecycle set /sock_detector configure
 ros2 lifecycle set /sock_detector activate
 ros2 topic echo /detections/socks
 ```
+
+> The base `detect.launch.py` is still available if you want to set `sim` and
+> the model paths by hand (e.g. `detect.launch.py sim:=true model_path:=...`).
 
 ### 4. Simulation demo (via jetank_ros_main)
 
@@ -131,7 +149,10 @@ int32 frames_processed
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `model_path` | string | `""` | Path to `.pt` or `.engine` model |
+| `sim` | bool | `false` | Environment selector: `true` loads `model_path_sim`, `false` loads `model_path_real` |
+| `model_path` | string | `""` | Explicit `.pt`/`.engine` path; **overrides** the sim/real selection when set |
+| `model_path_sim` | string | `""` | Model loaded when `sim:=true` (trained on Gazebo imagery) |
+| `model_path_real` | string | `""` | Model loaded when `sim:=false` (trained on real camera frames) |
 | `input_image_topic` | string | `/stereo_camera/left/image_raw` | Input camera topic |
 | `confidence` | float | `0.5` | Detection confidence threshold |
 | `n_frames` | int | `10` | Frames per action goal |

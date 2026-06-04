@@ -45,7 +45,10 @@ class SockDetectorNode(LifecycleNode):
 
     Parameters (declared in on_configure)
     --------------------------------------
-    model_path          : str   path to the .pt/.engine model file
+    sim                 : bool  if true, load the sim model; else the real one
+    model_path          : str   explicit model path; overrides sim/real selection
+    model_path_sim      : str   model to load when sim=true (Gazebo imagery)
+    model_path_real     : str   model to load when sim=false (real camera)
     input_image_topic   : str   left camera topic
     confidence          : float detection confidence threshold (default 0.5)
     n_frames            : int   frames to process in on-demand action (default 10)
@@ -76,7 +79,10 @@ class SockDetectorNode(LifecycleNode):
         self.get_logger().info("Configuring SockDetectorNode...")
 
         # Declare parameters
+        self.declare_parameter("sim", False)
         self.declare_parameter("model_path", "")
+        self.declare_parameter("model_path_sim", "")
+        self.declare_parameter("model_path_real", "")
         self.declare_parameter("input_image_topic", "/stereo_camera/left/image_raw")
         self.declare_parameter("confidence", 0.5)
         self.declare_parameter("n_frames", 10)
@@ -85,7 +91,30 @@ class SockDetectorNode(LifecycleNode):
         self.declare_parameter("detections_topic", "/detections/socks")
         self.declare_parameter("debug_image_topic", "/detections/socks/debug")
 
+        # Resolve which model to load. Sim and real need *different* models:
+        # the synthetic Gazebo imagery (perfect rectification, synthetic
+        # textures/lighting) differs enough from real camera frames that one
+        # model does not serve both well (see plan §2a). An explicit
+        # `model_path` always wins (override / back-compat); otherwise the
+        # `sim` flag selects the sim or real model.
+        sim = self.get_parameter("sim").get_parameter_value().bool_value
         model_path = self.get_parameter("model_path").get_parameter_value().string_value
+        model_path_sim = (
+            self.get_parameter("model_path_sim").get_parameter_value().string_value
+        )
+        model_path_real = (
+            self.get_parameter("model_path_real").get_parameter_value().string_value
+        )
+        if model_path:
+            resolved_model, model_source = model_path, "model_path (explicit override)"
+        elif sim:
+            resolved_model, model_source = model_path_sim, "model_path_sim (sim)"
+        else:
+            resolved_model, model_source = model_path_real, "model_path_real (real)"
+        self.get_logger().info(
+            f"Environment: {'SIM' if sim else 'REAL'} — model from {model_source}"
+        )
+
         detections_topic = (
             self.get_parameter("detections_topic").get_parameter_value().string_value
         )
@@ -97,17 +126,18 @@ class SockDetectorNode(LifecycleNode):
         # Create backend
         self._backend = make_backend("ultralytics")
 
-        if model_path:
+        if resolved_model:
             try:
-                self._backend.load(model_path)
-                self.get_logger().info(f"Model loaded from {model_path}")
+                self._backend.load(resolved_model)
+                self.get_logger().info(f"Model loaded from {resolved_model}")
             except RuntimeError as exc:
                 self.get_logger().error(f"Failed to load model: {exc}")
                 # Don't crash — node starts without inference capability
         else:
             self.get_logger().warn(
-                "no model_path set — node will start but cannot infer until "
-                "configured with a model"
+                f"no model resolved for {'SIM' if sim else 'REAL'} environment "
+                "(set model_path, or model_path_sim/model_path_real) — node will "
+                "start but cannot infer until configured with a model"
             )
 
         # Create lifecycle publishers
