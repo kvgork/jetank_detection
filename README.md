@@ -112,6 +112,41 @@ ros2 launch jetank_ros_main sim_demo.launch.py world:=sock_arena detect:=true sl
 
 ---
 
+## Capturing a training dataset
+
+The **real** track is captured with the web UI `/capture` button
+(`jetank_web_control`, saving to `~/datasets/detection`). The **sim** track uses
+the headless `capture_frames` node — start a Gazebo `sock_arena` session, then
+record frames at a fixed interval (no human clicking):
+
+```bash
+# Terminal 1 — sim with the sock arena
+ros2 launch jetank_ros_main sim_demo.launch.py world:=sock_arena slam:=false
+
+# Terminal 2 — capture 600 frames, one every 0.5 s, into the sim dataset dir
+ros2 run jetank_detection capture_frames --ros-args \
+    -p output_dir:=$HOME/datasets/detection/sim \
+    -p domain:=sim -p interval_sec:=0.5 -p max_frames:=600
+```
+
+Frames are written as `sock_<domain>_NNNNNN.jpg`; numbering resumes after any
+existing frames so multiple runs (different floor textures / lighting) accumulate
+into one dataset. `max_frames:=0` captures until Ctrl-C.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `input_image_topic` | `/stereo_camera/left/image_raw` | image topic to capture |
+| `output_dir` | `~/datasets/detection/sim` | where JPEGs are written |
+| `domain` | `sim` | filename tag (`sim` / `real`) |
+| `interval_sec` | `1.0` | seconds between saved frames |
+| `max_frames` | `0` | stop after N frames (0 = unlimited) |
+| `jpeg_quality` | `95` | JPEG quality 1–100 |
+
+The full sim data→model loop (domain randomization, auto-labelling, training) is
+specified in `jetank_ros_main/plans/sock-sim-autotrain-plan.md`.
+
+---
+
 ## Topics
 
 | Topic | Type | Description |

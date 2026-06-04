@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-r"""Real-robot sock-detector entry point.
+r"""
+Real-robot sock-detector entry point.
 
 Thin wrapper over ``detect.launch.py`` that pins ``sim:=false`` so the node
 loads the **real** model (``model_path_real``), trained on real camera frames.
