@@ -70,6 +70,16 @@ Two launch entry points wrap the base `detect.launch.py` and pin the flag:
 | `detect_sim.launch.py`  | `true`  | continuous (live) | Gazebo / `sim_demo` |
 | `detect_real.launch.py` | `false` | on-demand (action) | physical robot |
 
+**Why two wrappers and not one `sim:=` arg?** The base `detect.launch.py`
+already takes `sim` as an argument — the wrappers exist because sim and real
+differ on a *bundle* of correlated defaults, not just one flag. Sim defaults to
+`continuous:=true` (live publisher for the visual demo) and exposes
+`model_path_sim`; real defaults to `continuous:=false` (discrete
+drive→detect→grasp action) and exposes `model_path_real` + `n_frames`. The
+wrappers encode "sim means this whole profile" so the call site is short and
+hard to misconfigure, and give `sim_demo.launch.py` a clean include target. Use
+the base `detect.launch.py` directly when you want to set the flags by hand.
+
 ### 1. Build
 
 ```bash
