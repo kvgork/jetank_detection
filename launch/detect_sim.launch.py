@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-r"""Sim sock-detector entry point.
+r"""
+Sim sock-detector entry point.
 
 Thin wrapper over ``detect.launch.py`` that pins ``sim:=true`` so the node
 loads the **sim** model (``model_path_sim``), trained on Gazebo imagery. Use

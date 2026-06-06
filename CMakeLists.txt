@@ -43,6 +43,13 @@ install(PROGRAMS
   RENAME sock_detector_node
 )
 
+# Install the dataset capture helper (`ros2 run jetank_detection capture_frames`)
+install(PROGRAMS
+  jetank_detection/capture_frames.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME capture_frames
+)
+
 # Install launch and config directories
 install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME}

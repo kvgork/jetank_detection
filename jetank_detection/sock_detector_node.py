@@ -171,10 +171,10 @@ class SockDetectorNode(LifecycleNode):
         """Activate publishers and optionally start the continuous subscriber."""
         self.get_logger().info("Activating SockDetectorNode...")
 
-        # Activate publishers
-        self._det_pub.on_activate(self.get_current_state())
-        if self._debug_pub is not None:
-            self._debug_pub.on_activate(self.get_current_state())
+        # Activate all managed lifecycle publishers (rclpy handles them via the
+        # base LifecycleNode; do NOT call publisher.on_activate manually — there
+        # is no Node.get_current_state() in rclpy).
+        super().on_activate(state)
 
         continuous = self.get_parameter("continuous").get_parameter_value().bool_value
         if continuous:
@@ -196,9 +196,8 @@ class SockDetectorNode(LifecycleNode):
             self.destroy_subscription(self._continuous_sub)
             self._continuous_sub = None
 
-        self._det_pub.on_deactivate(self.get_current_state())
-        if self._debug_pub is not None:
-            self._debug_pub.on_deactivate(self.get_current_state())
+        # Deactivate managed lifecycle publishers via the base node.
+        super().on_deactivate(state)
 
         return TransitionCallbackReturn.SUCCESS
 
