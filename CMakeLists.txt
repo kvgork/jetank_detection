@@ -66,6 +66,7 @@ if(BUILD_TESTING)
 
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_import test/test_import.py)
+  ament_add_pytest_test(test_logic test/test_logic.py)
 endif()
 
 ament_package()

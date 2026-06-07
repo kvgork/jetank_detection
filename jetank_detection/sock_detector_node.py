@@ -201,16 +201,23 @@ class SockDetectorNode(LifecycleNode):
 
         return TransitionCallbackReturn.SUCCESS
 
-    def on_cleanup(self, state):
-        """Clean up the backend and action server."""
-        self.get_logger().info("Cleaning up SockDetectorNode...")
+    def _teardown_action_and_sub(self):
+        """Destroy the action server and continuous subscriber if present.
+
+        Shared by on_cleanup/on_shutdown; the continuous-sub guard also covers
+        cleanup reached without a preceding deactivate.
+        """
         if self._action_server is not None:
             self._action_server.destroy()
             self._action_server = None
-        # Guard against cleanup reached without a preceding deactivate
         if self._continuous_sub is not None:
             self.destroy_subscription(self._continuous_sub)
             self._continuous_sub = None
+
+    def on_cleanup(self, state):
+        """Clean up the backend and action server."""
+        self.get_logger().info("Cleaning up SockDetectorNode...")
+        self._teardown_action_and_sub()
         self._backend = None
         self._latest_image = None
         return TransitionCallbackReturn.SUCCESS
@@ -218,12 +225,7 @@ class SockDetectorNode(LifecycleNode):
     def on_shutdown(self, state):
         """Shut down the node and destroy the action server."""
         self.get_logger().info("Shutting down SockDetectorNode...")
-        if self._action_server is not None:
-            self._action_server.destroy()
-            self._action_server = None
-        if self._continuous_sub is not None:
-            self.destroy_subscription(self._continuous_sub)
-            self._continuous_sub = None
+        self._teardown_action_and_sub()
         return TransitionCallbackReturn.SUCCESS
 
     # ------------------------------------------------------------------
