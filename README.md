@@ -264,6 +264,30 @@ int32 frames_processed
 
 ---
 
+## Tests
+
+Two pytest files under `test/`, both registered in `CMakeLists.txt` via
+`ament_add_pytest_test`. They exercise the package's own Python logic only —
+ROS/torch/cv2 deps are stubbed when absent, so the suite runs in a bare env.
+
+| File | Imports | Asserts |
+|------|---------|---------|
+| `test_import.py` (5) | `jetank_detection.backends` | Package imports without torch/ultralytics; `Detection` dataclass defaults (`label="sock"`, `class_id=0`); `make_backend("ultralytics")` returns an `UltralyticsBackend`; `tensorrt`/`subprocess` raise `NotImplementedError`; unknown names raise `ValueError`. |
+| `test_logic.py` (14) | `backends`, `capture_frames`, `sock_detector_node` | `UltralyticsBackend.infer` xyxy→cx/cy/w/h box conversion + conf-threshold forwarding + class-id passthrough; `FrameCaptureNode._next_start_index` filename-resume math (empty dir → 0, resumes past highest index, ignores other-domain/non-jpg/non-numeric names); `SockDetectorNode._draw_detections` cx/cy/w/h→corner truncation and `_build_detection_array` Detection→`Detection2DArray` bbox/score mapping. |
+
+Run them (from the workspace root):
+
+```bash
+# Standalone pytest
+pixi run -- bash -c 'cd src/jetank_detection && python -m pytest test/ -q'
+
+# As part of the colcon build (also runs ament lint)
+pixi run -- colcon test --packages-select jetank_detection
+pixi run -- colcon test-result --verbose
+```
+
+---
+
 ## NOT YET DONE / Hardware-Gated
 
 The following phases require physical hardware or off-robot compute and are
