@@ -117,7 +117,8 @@ def main():
     print(f'src           : {src}')
     print(f'labelled      : {len(pairs)} (negatives/empty: {negatives})')
     print(f'unlabelled    : {unlabelled} (skipped — not yet annotated)')
-    print(f'train / val   : {len(train)} / {len(val)}  (val-frac {args.val_frac}, seed {args.seed})')
+    print(f'train / val   : {len(train)} / {len(val)}  '
+          f'(val-frac {args.val_frac}, seed {args.seed})')
     print(f'classes       : {args.names}')
     print(f'data.yaml     : {data_yaml}')
     print(f'\nlink mode     : {"copy" if args.copy else "symlink"}')
