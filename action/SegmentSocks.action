@@ -1,0 +1,13 @@
+# Goal — segment the detected sock(s) into a 3D point-cloud blob.
+string target_frame      # output frame; server defaults to base_link when empty
+float32 min_score        # detection score gate (0 = accept all)
+float32 max_range        # z clip in metres (<= 0 = no clip)
+bool publish_debug       # also publish the blob on /socks/points for RViz
+---
+# Result
+bool found               # false if no sock passed the gates
+SockCloud sock           # the sock whose centroid is nearest the robot (base_link)
+---
+# Feedback
+uint16 processed         # detections reprojected so far
+uint16 total             # detections to process
