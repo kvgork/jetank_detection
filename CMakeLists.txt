@@ -12,6 +12,8 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(vision_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 
 # Generate interfaces (action).
 # NOTE: rosidl_generate_interfaces internally calls
@@ -23,7 +25,9 @@ find_package(builtin_interfaces REQUIRED)
 # Python site-packages destination that ament_cmake_python would use.
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/DetectSocks.action"
-  DEPENDENCIES vision_msgs std_msgs builtin_interfaces
+  "msg/SockCloud.msg"
+  "action/SegmentSocks.action"
+  DEPENDENCIES vision_msgs std_msgs builtin_interfaces sensor_msgs geometry_msgs
 )
 
 # Install the source Python package files alongside the generated bindings.
