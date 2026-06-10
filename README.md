@@ -225,7 +225,8 @@ Notes:
 
 | Action | Type | Description |
 |--------|------|-------------|
-| `/detect_socks` | `jetank_detection/DetectSocks` | On-demand: collect N frames, return best detection |
+| `/detect_socks` | `jetank_detection/DetectSocks` | On-demand: collect N frames, return best 2D detection |
+| `/segment_socks` | `jetank_detection/SegmentSocks` | Reproject detections to a 3D point-cloud blob, return the nearest sock |
 
 ### DetectSocks interface
 
@@ -242,6 +243,40 @@ bool found                         # true if any sock found
 ---
 # Feedback
 int32 frames_processed
+```
+
+### SegmentSocks interface
+
+This package **defines** the `SegmentSocks` action + `SockCloud` message used by
+the 3D segmentation pipeline. The **server that implements it lives in
+`jetank_perception`** (it needs the stereo depth / point cloud) — see that
+package for the node. Defined here so the message contract has a single owner.
+
+```
+# Goal
+string target_frame  # output frame; server defaults to base_link when empty
+float32 min_score    # detection score gate (0 = accept all)
+float32 max_range    # z clip in metres (<= 0 = no clip)
+bool publish_debug   # also publish the blob on /socks/points for RViz
+---
+# Result
+bool found           # false if no sock passed the gates
+SockCloud sock       # the sock whose centroid is nearest the robot (base_link)
+---
+# Feedback
+uint16 processed     # detections reprojected so far
+uint16 total         # detections to process
+```
+
+`SockCloud` (`msg/SockCloud.msg`) — one sock's 3D blob, expressed in the goal's
+`target_frame`:
+
+```
+sensor_msgs/PointCloud2 cloud         # points belonging to the sock
+geometry_msgs/PointStamped centroid   # blob centroid (target_frame)
+geometry_msgs/Vector3 dimensions      # axis-aligned bounding-box size (m)
+string label                          # detection class label
+float32 score                         # detection confidence
 ```
 
 ---
