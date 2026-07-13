@@ -102,26 +102,29 @@ from jetank_detection.backends import Detection, UltralyticsBackend  # noqa: E40
 
 
 class _FakeTensor:
-    """Mimics the .tolist()/float()/int() surface of an ultralytics tensor row."""
+    """Mimics the batched .tolist() surface of an ultralytics tensor."""
 
-    def __init__(self, value):
-        self._value = value
+    def __init__(self, values):
+        self._values = list(values)
 
     def tolist(self):
-        return list(self._value)
+        return list(self._values)
 
-    def __float__(self):
-        return float(self._value)
-
-    def __int__(self):
-        return int(self._value)
+    def __len__(self):
+        return len(self._values)
 
 
-class _FakeBox:
-    def __init__(self, xyxy, conf, cls):
-        self.xyxy = [_FakeTensor(xyxy)]
-        self.conf = [_FakeTensor(conf)]
-        self.cls = [_FakeTensor(cls)]
+class _FakeBoxes:
+    """Mimics the batched .xyxy/.conf/.cls surface of ultralytics Boxes."""
+
+    def __init__(self, rows):
+        # rows: iterable of (xyxy, conf, cls) per detection
+        self.xyxy = _FakeTensor([list(r[0]) for r in rows])
+        self.conf = _FakeTensor([r[1] for r in rows])
+        self.cls = _FakeTensor([r[2] for r in rows])
+
+    def __len__(self):
+        return len(self.xyxy)
 
 
 class _FakeResult:
@@ -147,7 +150,9 @@ class TestUltralyticsInfer:
     def test_xyxy_to_cxcywh_conversion(self):
         # box (10,20)-(50,80): cx=30 cy=50 w=40 h=60
         backend = UltralyticsBackend()
-        backend._model = _FakeModel([_FakeResult([_FakeBox([10, 20, 50, 80], 0.8, 0)])])
+        backend._model = _FakeModel(
+            [_FakeResult(_FakeBoxes([([10, 20, 50, 80], 0.8, 0)]))]
+        )
         dets = backend.infer(object(), conf_threshold=0.4)
         assert len(dets) == 1
         d = dets[0]
@@ -161,7 +166,7 @@ class TestUltralyticsInfer:
 
     def test_conf_threshold_forwarded_to_predict(self):
         backend = UltralyticsBackend()
-        model = _FakeModel([_FakeResult([])])
+        model = _FakeModel([_FakeResult(_FakeBoxes([]))])
         backend._model = model
         backend.infer(object(), conf_threshold=0.73)
         assert model.calls == [(0.73, False)]
@@ -173,10 +178,10 @@ class TestUltralyticsInfer:
 
     def test_multiple_boxes_and_class_id(self):
         backend = UltralyticsBackend()
-        backend._model = _FakeModel([_FakeResult([
-            _FakeBox([0, 0, 2, 2], 0.5, 1),
-            _FakeBox([4, 4, 6, 10], 0.9, 3),
-        ])])
+        backend._model = _FakeModel([_FakeResult(_FakeBoxes([
+            ([0, 0, 2, 2], 0.5, 1),
+            ([4, 4, 6, 10], 0.9, 3),
+        ]))])
         dets = backend.infer(object())
         assert [d.class_id for d in dets] == [1, 3]
         assert dets[1].cx == pytest.approx(5.0)
