@@ -54,8 +54,8 @@ install(PROGRAMS
   RENAME capture_frames
 )
 
-# Install launch and config directories
-install(DIRECTORY launch config
+# Install launch directory
+install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
 )
 
