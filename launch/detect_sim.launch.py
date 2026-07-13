@@ -15,6 +15,12 @@ Usage::
     ros2 lifecycle set /sock_detector activate
     ros2 topic echo /detections/socks
 
+The remaining knobs (``confidence``, ``debug``, ``input_image_topic``, ...)
+are declared by the included ``detect.launch.py`` and pass straight through —
+in Humble, launch configurations are not scoped by IncludeLaunchDescription,
+so e.g. ``confidence:=0.6`` on this wrapper reaches the node without
+re-declaration here (they just don't show in ``--show-args``).
+
 For the real robot use ``detect_real.launch.py`` instead.
 """
 
@@ -37,18 +43,10 @@ def generate_launch_description():
         default_value="true",
         description="Live publisher mode (default true for the sim demo)",
     )
-    declare_confidence = DeclareLaunchArgument(
-        "confidence", default_value="0.5", description="Detection confidence threshold"
-    )
-    declare_debug = DeclareLaunchArgument(
-        "debug", default_value="true", description="Publish annotated debug image"
-    )
-    declare_input_topic = DeclareLaunchArgument(
-        "input_image_topic",
-        default_value="/stereo_camera/left/image_raw",
-        description="Input image topic (sim left camera)",
-    )
 
+    # Only the args this wrapper pins (sim) or re-defaults (continuous) are
+    # declared/forwarded; everything else passes through to detect.launch.py
+    # unscoped (see module docstring).
     detect = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution(
@@ -59,9 +57,6 @@ def generate_launch_description():
             "sim": "true",
             "model_path_sim": LaunchConfiguration("model_path_sim"),
             "continuous": LaunchConfiguration("continuous"),
-            "confidence": LaunchConfiguration("confidence"),
-            "debug": LaunchConfiguration("debug"),
-            "input_image_topic": LaunchConfiguration("input_image_topic"),
         }.items(),
     )
 
@@ -69,9 +64,6 @@ def generate_launch_description():
         [
             declare_model_path_sim,
             declare_continuous,
-            declare_confidence,
-            declare_debug,
-            declare_input_topic,
             detect,
         ]
     )

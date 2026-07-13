@@ -16,6 +16,12 @@ Usage::
     ros2 action send_goal /detect_socks jetank_detection/action/DetectSocks \
         '{timeout: 5.0, min_confidence: 0.5, n_frames: 10}'
 
+The remaining knobs (``confidence``, ``debug``, ``input_image_topic``,
+``n_frames``, ...) are declared by the included ``detect.launch.py`` and pass
+straight through — in Humble, launch configurations are not scoped by
+IncludeLaunchDescription, so e.g. ``confidence:=0.6`` on this wrapper reaches
+the node without re-declaration here (they just don't show in ``--show-args``).
+
 For the simulator use ``detect_sim.launch.py`` instead.
 """
 
@@ -38,23 +44,10 @@ def generate_launch_description():
         default_value="false",
         description="On-demand mode (default false for the discrete pick task)",
     )
-    declare_confidence = DeclareLaunchArgument(
-        "confidence", default_value="0.5", description="Detection confidence threshold"
-    )
-    declare_debug = DeclareLaunchArgument(
-        "debug", default_value="true", description="Publish annotated debug image"
-    )
-    declare_input_topic = DeclareLaunchArgument(
-        "input_image_topic",
-        default_value="/stereo_camera/left/image_raw",
-        description="Input image topic (real left camera)",
-    )
-    declare_n_frames = DeclareLaunchArgument(
-        "n_frames",
-        default_value="10",
-        description="Frames to process per DetectSocks action goal",
-    )
 
+    # Only the args this wrapper pins (sim) or re-defaults (continuous) are
+    # declared/forwarded; everything else passes through to detect.launch.py
+    # unscoped (see module docstring).
     detect = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution(
@@ -65,10 +58,6 @@ def generate_launch_description():
             "sim": "false",
             "model_path_real": LaunchConfiguration("model_path_real"),
             "continuous": LaunchConfiguration("continuous"),
-            "confidence": LaunchConfiguration("confidence"),
-            "debug": LaunchConfiguration("debug"),
-            "input_image_topic": LaunchConfiguration("input_image_topic"),
-            "n_frames": LaunchConfiguration("n_frames"),
         }.items(),
     )
 
@@ -76,10 +65,6 @@ def generate_launch_description():
         [
             declare_model_path_real,
             declare_continuous,
-            declare_confidence,
-            declare_debug,
-            declare_input_topic,
-            declare_n_frames,
             detect,
         ]
     )
