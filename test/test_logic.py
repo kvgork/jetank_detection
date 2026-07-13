@@ -251,7 +251,7 @@ def _bare_detector():
 class TestDrawDetectionsGeometry:
     """_draw_detections converts cx/cy/w/h to corner coords for cv2.rectangle."""
 
-    def test_corner_math_via_recorded_rectangles(self, monkeypatch):
+    def test_corner_math_via_recorded_rectangles(self):
         rects = []
 
         class _CV2Spy:
@@ -263,38 +263,43 @@ class TestDrawDetectionsGeometry:
             def putText(self, *a, **k):
                 pass
 
-        # _draw_detections does `import cv2` locally; patch the module entry.
-        monkeypatch.setitem(sys.modules, 'cv2', _CV2Spy())
-
         class _Img:
             def copy(self):
                 return self
 
+        # _draw_detections uses the cv2 module cached on the node (_cv2,
+        # resolved once in on_configure); inject the spy there.
+        node = _bare_detector()
+        node._cv2 = _CV2Spy()
         det = Detection(cx=100.0, cy=50.0, w=40.0, h=20.0, score=0.9)
-        out = _bare_detector()._draw_detections(_Img(), [det])
+        out = node._draw_detections(_Img(), [det])
         assert out is not None
         # x1=cx-w/2=80, y1=cy-h/2=40, x2=cx+w/2=120, y2=cy+h/2=60
         assert rects == [((80, 40), (120, 60))]
 
-    def test_truncates_to_int(self, monkeypatch):
+    def test_truncates_to_int(self):
         rects = []
-        monkeypatch.setitem(
-            sys.modules, 'cv2',
-            type('C', (), {
-                'FONT_HERSHEY_SIMPLEX': 0,
-                'rectangle': lambda self, img, p1, p2, *a, **k: rects.append((p1, p2)),
-                'putText': lambda self, *a, **k: None,
-            })(),
-        )
 
         class _Img:
             def copy(self):
                 return self
 
+        node = _bare_detector()
+        node._cv2 = type('C', (), {
+            'FONT_HERSHEY_SIMPLEX': 0,
+            'rectangle': lambda self, img, p1, p2, *a, **k: rects.append((p1, p2)),
+            'putText': lambda self, *a, **k: None,
+        })()
         det = Detection(cx=10.6, cy=10.6, w=3.0, h=3.0, score=0.5)
-        _bare_detector()._draw_detections(_Img(), [det])
+        node._draw_detections(_Img(), [det])
         # int() truncates toward zero: 10.6-1.5=9.1 -> 9 ; 10.6+1.5=12.1 -> 12
         assert rects == [((9, 9), (12, 12))]
+
+    def test_missing_cv2_raises_runtime_error(self):
+        node = _bare_detector()
+        node._cv2 = None
+        with pytest.raises(RuntimeError):
+            node._draw_detections(object(), [])
 
 
 @pytest.mark.skipif(not _have_vision_msgs, reason='vision_msgs not available')
