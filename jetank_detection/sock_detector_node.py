@@ -261,7 +261,14 @@ class SockDetectorNode(LifecycleNode):
         if self._det_pub is not None and self._det_pub.is_activated:
             self._det_pub.publish(det_array)
 
-        if self._debug_pub is not None and self._debug_pub.is_activated:
+        # Skip the annotated-image work entirely when nobody is listening:
+        # _draw_detections copies the full frame and cv2_to_imgmsg serialises
+        # it, which is wasted per-frame effort with zero subscribers.
+        if (
+            self._debug_pub is not None
+            and self._debug_pub.is_activated
+            and self._debug_pub.get_subscription_count() > 0
+        ):
             try:
                 debug_img = self._draw_detections(image_bgr, detections)
                 debug_msg = self._bridge.cv2_to_imgmsg(debug_img, encoding="bgr8")
