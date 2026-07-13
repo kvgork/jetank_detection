@@ -296,7 +296,13 @@ class SockDetectorNode(LifecycleNode):
         from jetank_detection.action import DetectSocks  # noqa: PLC0415
 
         goal = goal_handle.request
-        n_frames: int = goal.n_frames if goal.n_frames > 0 else 10
+        # goal.n_frames wins; otherwise fall back to the n_frames parameter
+        # (declared in on_configure, default 10).
+        n_frames: int = (
+            goal.n_frames
+            if goal.n_frames > 0
+            else self.get_parameter("n_frames").get_parameter_value().integer_value
+        )
         timeout: float = goal.timeout if goal.timeout > 0 else 5.0
         min_conf: float = goal.min_confidence if goal.min_confidence > 0 else 0.5
 
