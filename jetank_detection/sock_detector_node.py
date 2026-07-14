@@ -221,7 +221,8 @@ class SockDetectorNode(LifecycleNode):
         return TransitionCallbackReturn.SUCCESS
 
     def _teardown_action_and_sub(self):
-        """Destroy the action server and continuous subscriber if present.
+        """
+        Destroy the action server and continuous subscriber if present.
 
         Shared by on_cleanup/on_shutdown; the continuous-sub guard also covers
         cleanup reached without a preceding deactivate.
