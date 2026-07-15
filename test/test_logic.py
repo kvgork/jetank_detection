@@ -102,26 +102,29 @@ from jetank_detection.backends import Detection, UltralyticsBackend  # noqa: E40
 
 
 class _FakeTensor:
-    """Mimics the .tolist()/float()/int() surface of an ultralytics tensor row."""
+    """Mimics the batched .tolist() surface of an ultralytics tensor."""
 
-    def __init__(self, value):
-        self._value = value
+    def __init__(self, values):
+        self._values = list(values)
 
     def tolist(self):
-        return list(self._value)
+        return list(self._values)
 
-    def __float__(self):
-        return float(self._value)
-
-    def __int__(self):
-        return int(self._value)
+    def __len__(self):
+        return len(self._values)
 
 
-class _FakeBox:
-    def __init__(self, xyxy, conf, cls):
-        self.xyxy = [_FakeTensor(xyxy)]
-        self.conf = [_FakeTensor(conf)]
-        self.cls = [_FakeTensor(cls)]
+class _FakeBoxes:
+    """Mimics the batched .xyxy/.conf/.cls surface of ultralytics Boxes."""
+
+    def __init__(self, rows):
+        # rows: iterable of (xyxy, conf, cls) per detection
+        self.xyxy = _FakeTensor([list(r[0]) for r in rows])
+        self.conf = _FakeTensor([r[1] for r in rows])
+        self.cls = _FakeTensor([r[2] for r in rows])
+
+    def __len__(self):
+        return len(self.xyxy)
 
 
 class _FakeResult:
@@ -147,7 +150,9 @@ class TestUltralyticsInfer:
     def test_xyxy_to_cxcywh_conversion(self):
         # box (10,20)-(50,80): cx=30 cy=50 w=40 h=60
         backend = UltralyticsBackend()
-        backend._model = _FakeModel([_FakeResult([_FakeBox([10, 20, 50, 80], 0.8, 0)])])
+        backend._model = _FakeModel(
+            [_FakeResult(_FakeBoxes([([10, 20, 50, 80], 0.8, 0)]))]
+        )
         dets = backend.infer(object(), conf_threshold=0.4)
         assert len(dets) == 1
         d = dets[0]
@@ -161,7 +166,7 @@ class TestUltralyticsInfer:
 
     def test_conf_threshold_forwarded_to_predict(self):
         backend = UltralyticsBackend()
-        model = _FakeModel([_FakeResult([])])
+        model = _FakeModel([_FakeResult(_FakeBoxes([]))])
         backend._model = model
         backend.infer(object(), conf_threshold=0.73)
         assert model.calls == [(0.73, False)]
@@ -173,10 +178,10 @@ class TestUltralyticsInfer:
 
     def test_multiple_boxes_and_class_id(self):
         backend = UltralyticsBackend()
-        backend._model = _FakeModel([_FakeResult([
-            _FakeBox([0, 0, 2, 2], 0.5, 1),
-            _FakeBox([4, 4, 6, 10], 0.9, 3),
-        ])])
+        backend._model = _FakeModel([_FakeResult(_FakeBoxes([
+            ([0, 0, 2, 2], 0.5, 1),
+            ([4, 4, 6, 10], 0.9, 3),
+        ]))])
         dets = backend.infer(object())
         assert [d.class_id for d in dets] == [1, 3]
         assert dets[1].cx == pytest.approx(5.0)
@@ -251,7 +256,7 @@ def _bare_detector():
 class TestDrawDetectionsGeometry:
     """_draw_detections converts cx/cy/w/h to corner coords for cv2.rectangle."""
 
-    def test_corner_math_via_recorded_rectangles(self, monkeypatch):
+    def test_corner_math_via_recorded_rectangles(self):
         rects = []
 
         class _CV2Spy:
@@ -263,38 +268,43 @@ class TestDrawDetectionsGeometry:
             def putText(self, *a, **k):
                 pass
 
-        # _draw_detections does `import cv2` locally; patch the module entry.
-        monkeypatch.setitem(sys.modules, 'cv2', _CV2Spy())
-
         class _Img:
             def copy(self):
                 return self
 
+        # _draw_detections uses the cv2 module cached on the node (_cv2,
+        # resolved once in on_configure); inject the spy there.
+        node = _bare_detector()
+        node._cv2 = _CV2Spy()
         det = Detection(cx=100.0, cy=50.0, w=40.0, h=20.0, score=0.9)
-        out = _bare_detector()._draw_detections(_Img(), [det])
+        out = node._draw_detections(_Img(), [det])
         assert out is not None
         # x1=cx-w/2=80, y1=cy-h/2=40, x2=cx+w/2=120, y2=cy+h/2=60
         assert rects == [((80, 40), (120, 60))]
 
-    def test_truncates_to_int(self, monkeypatch):
+    def test_truncates_to_int(self):
         rects = []
-        monkeypatch.setitem(
-            sys.modules, 'cv2',
-            type('C', (), {
-                'FONT_HERSHEY_SIMPLEX': 0,
-                'rectangle': lambda self, img, p1, p2, *a, **k: rects.append((p1, p2)),
-                'putText': lambda self, *a, **k: None,
-            })(),
-        )
 
         class _Img:
             def copy(self):
                 return self
 
+        node = _bare_detector()
+        node._cv2 = type('C', (), {
+            'FONT_HERSHEY_SIMPLEX': 0,
+            'rectangle': lambda self, img, p1, p2, *a, **k: rects.append((p1, p2)),
+            'putText': lambda self, *a, **k: None,
+        })()
         det = Detection(cx=10.6, cy=10.6, w=3.0, h=3.0, score=0.5)
-        _bare_detector()._draw_detections(_Img(), [det])
+        node._draw_detections(_Img(), [det])
         # int() truncates toward zero: 10.6-1.5=9.1 -> 9 ; 10.6+1.5=12.1 -> 12
         assert rects == [((9, 9), (12, 12))]
+
+    def test_missing_cv2_raises_runtime_error(self):
+        node = _bare_detector()
+        node._cv2 = None
+        with pytest.raises(RuntimeError):
+            node._draw_detections(object(), [])
 
 
 @pytest.mark.skipif(not _have_vision_msgs, reason='vision_msgs not available')

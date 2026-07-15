@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Build a YOLO train/val dataset from web-labeller captures.
+"""
+Build a YOLO train/val dataset from web-labeller captures.
 
 The web control labeller (``jetank_web_control``) saves a flat directory of
 ``<name>.jpg`` images with YOLO ``<name>.txt`` sidecars plus a ``classes.txt``.

@@ -69,6 +69,13 @@ class SockDetectorNode(LifecycleNode):
         self._debug_pub = None
         self._latest_image = None
         self._image_lock = threading.Lock()
+        # Hot-path caches (resolved in on_configure): the continuous image
+        # callback runs per frame, where a string-keyed get_parameter lookup
+        # and a repeated `import cv2` are avoidable constant costs.
+        self._confidence = 0.5
+        self._cv2 = None
+        # Keep the cached confidence in sync with runtime `ros2 param set`.
+        self.add_on_set_parameters_callback(self._on_set_parameters)
 
     # ------------------------------------------------------------------
     # Lifecycle callbacks
@@ -122,6 +129,18 @@ class SockDetectorNode(LifecycleNode):
             self.get_parameter("debug_image_topic").get_parameter_value().string_value
         )
         debug = self.get_parameter("debug").get_parameter_value().bool_value
+
+        # Cache hot-path values once (see __init__); _on_set_parameters keeps
+        # the confidence cache fresh for runtime tuning.
+        self._confidence = (
+            self.get_parameter("confidence").get_parameter_value().double_value
+        )
+        try:
+            import cv2  # noqa: PLC0415 (deferred so the module imports without cv2)
+
+            self._cv2 = cv2
+        except ImportError:
+            self._cv2 = None  # debug drawing will be skipped with a warning
 
         # Create backend
         self._backend = make_backend("ultralytics")
@@ -202,7 +221,8 @@ class SockDetectorNode(LifecycleNode):
         return TransitionCallbackReturn.SUCCESS
 
     def _teardown_action_and_sub(self):
-        """Destroy the action server and continuous subscriber if present.
+        """
+        Destroy the action server and continuous subscriber if present.
 
         Shared by on_cleanup/on_shutdown; the continuous-sub guard also covers
         cleanup reached without a preceding deactivate.
@@ -250,7 +270,7 @@ class SockDetectorNode(LifecycleNode):
             self.get_logger().error(f"cv_bridge conversion failed: {exc}")
             return
 
-        conf = self.get_parameter("confidence").get_parameter_value().double_value
+        conf = self._confidence
         try:
             detections = self._backend.infer(image_bgr, conf_threshold=conf)
         except Exception as exc:  # noqa: BLE001
@@ -261,7 +281,14 @@ class SockDetectorNode(LifecycleNode):
         if self._det_pub is not None and self._det_pub.is_activated:
             self._det_pub.publish(det_array)
 
-        if self._debug_pub is not None and self._debug_pub.is_activated:
+        # Skip the annotated-image work entirely when nobody is listening:
+        # _draw_detections copies the full frame and cv2_to_imgmsg serialises
+        # it, which is wasted per-frame effort with zero subscribers.
+        if (
+            self._debug_pub is not None
+            and self._debug_pub.is_activated
+            and self._debug_pub.get_subscription_count() > 0
+        ):
             try:
                 debug_img = self._draw_detections(image_bgr, detections)
                 debug_msg = self._bridge.cv2_to_imgmsg(debug_img, encoding="bgr8")
@@ -289,7 +316,13 @@ class SockDetectorNode(LifecycleNode):
         from jetank_detection.action import DetectSocks  # noqa: PLC0415
 
         goal = goal_handle.request
-        n_frames: int = goal.n_frames if goal.n_frames > 0 else 10
+        # goal.n_frames wins; otherwise fall back to the n_frames parameter
+        # (declared in on_configure, default 10).
+        n_frames: int = (
+            goal.n_frames
+            if goal.n_frames > 0
+            else self.get_parameter("n_frames").get_parameter_value().integer_value
+        )
         timeout: float = goal.timeout if goal.timeout > 0 else 5.0
         min_conf: float = goal.min_confidence if goal.min_confidence > 0 else 0.5
 
@@ -422,9 +455,22 @@ class SockDetectorNode(LifecycleNode):
 
         return array
 
+    def _on_set_parameters(self, params):
+        """Refresh cached hot-path values when parameters are set at runtime."""
+        # Deferred import (project pattern): keeps the module importable in a
+        # bare env; only runs when a real ROS parameter service is present.
+        from rcl_interfaces.msg import SetParametersResult  # noqa: PLC0415
+
+        for param in params:
+            if param.name == "confidence":
+                self._confidence = float(param.value)
+        return SetParametersResult(successful=True)
+
     def _draw_detections(self, image_bgr, detections):
         """Draw bounding boxes on *image_bgr* and return the annotated image."""
-        import cv2  # noqa: PLC0415
+        cv2 = self._cv2  # resolved once in on_configure
+        if cv2 is None:
+            raise RuntimeError("cv2 unavailable — cannot draw debug detections")
 
         img = image_bgr.copy()
         for det in detections:

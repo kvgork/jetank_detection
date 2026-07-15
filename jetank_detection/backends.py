@@ -85,19 +85,25 @@ class UltralyticsBackend(DetectorBackend):
         detections = []
         for result in results:
             boxes = result.boxes
-            if boxes is None:
+            if boxes is None or len(boxes) == 0:
                 continue
-            for box in boxes:
+            # Pull each field for the whole batch in one device-to-host
+            # transfer instead of building a per-box Boxes wrapper and doing
+            # three tensor conversions per detection.
+            xyxy = boxes.xyxy.tolist()
+            confs = boxes.conf.tolist()
+            classes = boxes.cls.tolist()
+            for (x1, y1, x2, y2), score, cls_id in zip(xyxy, confs, classes):
                 # xyxy → cx, cy, w, h
-                x1, y1, x2, y2 = box.xyxy[0].tolist()
-                cx = (x1 + x2) / 2.0
-                cy = (y1 + y2) / 2.0
-                w = x2 - x1
-                h = y2 - y1
-                score = float(box.conf[0])
-                cls_id = int(box.cls[0])
                 detections.append(
-                    Detection(cx=cx, cy=cy, w=w, h=h, score=score, class_id=cls_id)
+                    Detection(
+                        cx=(x1 + x2) / 2.0,
+                        cy=(y1 + y2) / 2.0,
+                        w=x2 - x1,
+                        h=y2 - y1,
+                        score=float(score),
+                        class_id=int(cls_id),
+                    )
                 )
         return detections
 
