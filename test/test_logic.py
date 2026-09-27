@@ -137,8 +137,8 @@ class _FakeModel:
         self._results = results
         self.calls = []
 
-    def predict(self, image, conf, verbose):  # noqa: D102
-        self.calls.append((conf, verbose))
+    def predict(self, image, conf, imgsz=640, half=None, device=None, verbose=False):  # noqa: D102
+        self.calls.append((conf, imgsz, half, device, verbose))
         return self._results
 
 
@@ -169,7 +169,9 @@ class TestUltralyticsInfer:
         model = _FakeModel([_FakeResult(_FakeBoxes([]))])
         backend._model = model
         backend.infer(object(), conf_threshold=0.73)
-        assert model.calls == [(0.73, False)]
+        # imgsz/half/device default to the backend's own defaults
+        # (UltralyticsBackend() with no load(): 640 / None / None).
+        assert model.calls == [(0.73, 640, None, None, False)]
 
     def test_none_boxes_result_skipped(self):
         backend = UltralyticsBackend()

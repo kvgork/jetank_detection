@@ -58,6 +58,10 @@ class SockDetectorNode(LifecycleNode):
     debug               : bool  publish annotated debug image (default true)
     detections_topic    : str   topic for Detection2DArray output
     debug_image_topic   : str   topic for debug annotated image
+    imgsz               : int   YOLO inference input size (default 640)
+    device              : str   ultralytics device string, e.g. "cuda:0"/"cpu";
+                                empty (default) autodetects via torch.cuda.is_available()
+    half                : str   "auto" (default, True iff device is cuda) / "true" / "false"
     """
 
     def __init__(self) -> None:
@@ -105,6 +109,9 @@ class SockDetectorNode(LifecycleNode):
         self.declare_parameter("debug", True)
         self.declare_parameter("detections_topic", "/detections/socks")
         self.declare_parameter("debug_image_topic", "/detections/socks/debug")
+        self.declare_parameter("imgsz", 640)
+        self.declare_parameter("device", "")
+        self.declare_parameter("half", "auto")
 
         # Resolve which model to load. Sim and real need *different* models:
         # the synthetic Gazebo imagery (perfect rectification, synthetic
@@ -153,8 +160,16 @@ class SockDetectorNode(LifecycleNode):
         except ImportError:
             self._cv2 = None  # debug drawing will be skipped with a warning
 
-        # Create backend
-        self._backend = make_backend("ultralytics")
+        # Create backend. imgsz/device/half tune Jetson inference speed
+        # (FP16 + fixed input size); "auto"/"" preserve current behaviour
+        # (FP32 unless the resolved device is CUDA — resolved in load()).
+        imgsz = self.get_parameter("imgsz").get_parameter_value().integer_value
+        device = self.get_parameter("device").get_parameter_value().string_value or None
+        half_param = self.get_parameter("half").get_parameter_value().string_value.lower()
+        half = {"true": True, "false": False}.get(half_param)  # None for "auto"/other
+        self._backend = make_backend(
+            "ultralytics", imgsz=imgsz, half=half, device=device
+        )
 
         if resolved_model:
             try:
