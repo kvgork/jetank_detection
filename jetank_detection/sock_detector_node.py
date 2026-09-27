@@ -53,6 +53,8 @@ class SockDetectorNode(LifecycleNode):
     confidence          : float detection confidence threshold (default 0.5)
     n_frames            : int   frames to process in on-demand action (default 10)
     continuous          : bool  if true, subscribe and publish every frame when active
+    max_rate_hz         : float max inference rate in continuous mode, Hz (default 5.0);
+                                <= 0 disables throttling (infer on every frame)
     debug               : bool  publish annotated debug image (default true)
     detections_topic    : str   topic for Detection2DArray output
     debug_image_topic   : str   topic for debug annotated image
@@ -77,6 +79,8 @@ class SockDetectorNode(LifecycleNode):
         # and a repeated `import cv2` are avoidable constant costs.
         self._confidence = 0.5
         self._cv2 = None
+        self._max_rate_hz = 5.0
+        self._last_processed_mono = 0.0
         # Keep the cached confidence in sync with runtime `ros2 param set`.
         self.add_on_set_parameters_callback(self._on_set_parameters)
 
@@ -97,6 +101,7 @@ class SockDetectorNode(LifecycleNode):
         self.declare_parameter("confidence", 0.5)
         self.declare_parameter("n_frames", 10)
         self.declare_parameter("continuous", False)
+        self.declare_parameter("max_rate_hz", 5.0)
         self.declare_parameter("debug", True)
         self.declare_parameter("detections_topic", "/detections/socks")
         self.declare_parameter("debug_image_topic", "/detections/socks/debug")
@@ -137,6 +142,9 @@ class SockDetectorNode(LifecycleNode):
         # the confidence cache fresh for runtime tuning.
         self._confidence = (
             self.get_parameter("confidence").get_parameter_value().double_value
+        )
+        self._max_rate_hz = (
+            self.get_parameter("max_rate_hz").get_parameter_value().double_value
         )
         try:
             import cv2  # noqa: PLC0415 (deferred so the module imports without cv2)
@@ -262,11 +270,23 @@ class SockDetectorNode(LifecycleNode):
             self._image_cond.notify_all()
 
     def _continuous_image_callback(self, msg: Image) -> None:
-        """Process and publish detections for every incoming frame."""
+        """Process and publish detections, throttled to max_rate_hz."""
         self._store_latest(msg)
 
         if self._backend is None:
             return
+
+        # Throttle inference to max_rate_hz: the camera publishes at ~30 Hz
+        # but consumers (web overlay, grasp pipeline) only need a few Hz, and
+        # running Stage-1 inference on every frame pegs the GPU/CPU (see
+        # finding jetank_detection-02). _latest_image is stored above
+        # regardless, so the action's collect loop still sees every frame.
+        now = time.monotonic()
+        if self._max_rate_hz > 0.0 and (
+            now - self._last_processed_mono < 1.0 / self._max_rate_hz
+        ):
+            return
+        self._last_processed_mono = now
 
         try:
             image_bgr = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
@@ -469,6 +489,8 @@ class SockDetectorNode(LifecycleNode):
         for param in params:
             if param.name == "confidence":
                 self._confidence = float(param.value)
+            elif param.name == "max_rate_hz":
+                self._max_rate_hz = float(param.value)
         return SetParametersResult(successful=True)
 
     def _draw_detections(self, image_bgr, detections):
