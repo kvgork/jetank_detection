@@ -53,9 +53,15 @@ class SockDetectorNode(LifecycleNode):
     confidence          : float detection confidence threshold (default 0.5)
     n_frames            : int   frames to process in on-demand action (default 10)
     continuous          : bool  if true, subscribe and publish every frame when active
+    max_rate_hz         : float max inference rate in continuous mode, Hz (default 5.0);
+                                <= 0 disables throttling (infer on every frame)
     debug               : bool  publish annotated debug image (default true)
     detections_topic    : str   topic for Detection2DArray output
     debug_image_topic   : str   topic for debug annotated image
+    imgsz               : int   YOLO inference input size (default 640)
+    device              : str   ultralytics device string, e.g. "cuda:0"/"cpu";
+                                empty (default) autodetects via torch.cuda.is_available()
+    half                : str   "auto" (default, True iff device is cuda) / "true" / "false"
     """
 
     def __init__(self) -> None:
@@ -68,12 +74,17 @@ class SockDetectorNode(LifecycleNode):
         self._det_pub = None
         self._debug_pub = None
         self._latest_image = None
-        self._image_lock = threading.Lock()
+        # Condition (not a plain Lock): _store_latest notifies on every new
+        # frame so the action's collect loop can block until one arrives
+        # instead of polling on a timer (see finding jetank_detection-01).
+        self._image_cond = threading.Condition()
         # Hot-path caches (resolved in on_configure): the continuous image
         # callback runs per frame, where a string-keyed get_parameter lookup
         # and a repeated `import cv2` are avoidable constant costs.
         self._confidence = 0.5
         self._cv2 = None
+        self._max_rate_hz = 5.0
+        self._last_processed_mono = 0.0
         # Keep the cached confidence in sync with runtime `ros2 param set`.
         self.add_on_set_parameters_callback(self._on_set_parameters)
 
@@ -94,9 +105,13 @@ class SockDetectorNode(LifecycleNode):
         self.declare_parameter("confidence", 0.5)
         self.declare_parameter("n_frames", 10)
         self.declare_parameter("continuous", False)
+        self.declare_parameter("max_rate_hz", 5.0)
         self.declare_parameter("debug", True)
         self.declare_parameter("detections_topic", "/detections/socks")
         self.declare_parameter("debug_image_topic", "/detections/socks/debug")
+        self.declare_parameter("imgsz", 640)
+        self.declare_parameter("device", "")
+        self.declare_parameter("half", "auto")
 
         # Resolve which model to load. Sim and real need *different* models:
         # the synthetic Gazebo imagery (perfect rectification, synthetic
@@ -135,6 +150,9 @@ class SockDetectorNode(LifecycleNode):
         self._confidence = (
             self.get_parameter("confidence").get_parameter_value().double_value
         )
+        self._max_rate_hz = (
+            self.get_parameter("max_rate_hz").get_parameter_value().double_value
+        )
         try:
             import cv2  # noqa: PLC0415 (deferred so the module imports without cv2)
 
@@ -142,8 +160,16 @@ class SockDetectorNode(LifecycleNode):
         except ImportError:
             self._cv2 = None  # debug drawing will be skipped with a warning
 
-        # Create backend
-        self._backend = make_backend("ultralytics")
+        # Create backend. imgsz/device/half tune Jetson inference speed
+        # (FP16 + fixed input size); "auto"/"" preserve current behaviour
+        # (FP32 unless the resolved device is CUDA — resolved in load()).
+        imgsz = self.get_parameter("imgsz").get_parameter_value().integer_value
+        device = self.get_parameter("device").get_parameter_value().string_value or None
+        half_param = self.get_parameter("half").get_parameter_value().string_value.lower()
+        half = {"true": True, "false": False}.get(half_param)  # None for "auto"/other
+        self._backend = make_backend(
+            "ultralytics", imgsz=imgsz, half=half, device=device
+        )
 
         if resolved_model:
             try:
@@ -253,16 +279,29 @@ class SockDetectorNode(LifecycleNode):
     # ------------------------------------------------------------------
 
     def _store_latest(self, msg: Image) -> None:
-        """Store the most recent image message under the image lock."""
-        with self._image_lock:
+        """Store the most recent image message and wake any waiting goal."""
+        with self._image_cond:
             self._latest_image = msg
+            self._image_cond.notify_all()
 
     def _continuous_image_callback(self, msg: Image) -> None:
-        """Process and publish detections for every incoming frame."""
+        """Process and publish detections, throttled to max_rate_hz."""
         self._store_latest(msg)
 
         if self._backend is None:
             return
+
+        # Throttle inference to max_rate_hz: the camera publishes at ~30 Hz
+        # but consumers (web overlay, grasp pipeline) only need a few Hz, and
+        # running Stage-1 inference on every frame pegs the GPU/CPU (see
+        # finding jetank_detection-02). _latest_image is stored above
+        # regardless, so the action's collect loop still sees every frame.
+        now = time.monotonic()
+        if self._max_rate_hz > 0.0 and (
+            now - self._last_processed_mono < 1.0 / self._max_rate_hz
+        ):
+            return
+        self._last_processed_mono = now
 
         try:
             image_bgr = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
@@ -360,24 +399,25 @@ class SockDetectorNode(LifecycleNode):
                     goal_handle.canceled()
                     return DetectSocks.Result()
 
-                with self._image_lock:
+                with self._image_cond:
                     current_msg = self._latest_image
-
-                if current_msg is None:
-                    time.sleep(0.01)
-                    continue
-
-                # Deduplicate: skip if we already processed this stamp
-                stamp = (current_msg.header.stamp.sec, current_msg.header.stamp.nanosec)
-                if stamp == last_stamp:
-                    time.sleep(0.01)
-                    continue
-
-                last_stamp = stamp
-
-                if self._backend is None:
-                    time.sleep(0.01)
-                    continue
+                    stamp = (
+                        (current_msg.header.stamp.sec, current_msg.header.stamp.nanosec)
+                        if current_msg is not None
+                        else None
+                    )
+                    have_new_frame = current_msg is not None and stamp != last_stamp
+                    if not have_new_frame or self._backend is None:
+                        # Block until _store_latest notifies a new frame
+                        # instead of busy-polling every 10 ms. Cap the wait
+                        # so cancellation and the goal deadline are still
+                        # checked several times a second even if no frame
+                        # ever arrives (was: three separate
+                        # time.sleep(0.01) branches doing this same check).
+                        remaining = deadline - time.monotonic()
+                        self._image_cond.wait(timeout=max(0.0, min(remaining, 0.5)))
+                        continue
+                    last_stamp = stamp
 
                 try:
                     image_bgr = self._bridge.imgmsg_to_cv2(
@@ -464,6 +504,8 @@ class SockDetectorNode(LifecycleNode):
         for param in params:
             if param.name == "confidence":
                 self._confidence = float(param.value)
+            elif param.name == "max_rate_hz":
+                self._max_rate_hz = float(param.value)
         return SetParametersResult(successful=True)
 
     def _draw_detections(self, image_bgr, detections):

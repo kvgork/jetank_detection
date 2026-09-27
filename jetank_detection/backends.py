@@ -53,23 +53,72 @@ class UltralyticsBackend(DetectorBackend):
     imported without torch installed.  Call :meth:`load` before :meth:`infer`.
     """
 
-    def __init__(self) -> None:
-        """Initialise backend without loading a model."""
+    def __init__(
+        self,
+        imgsz: int = 640,
+        half: bool | None = None,
+        device: str | None = None,
+    ) -> None:
+        """
+        Initialise backend without loading a model.
+
+        Parameters
+        ----------
+        imgsz:
+            Inference input size passed to ``predict()`` (default 640, the
+            ultralytics default — unchanged behaviour).
+        half:
+            Force FP16 inference. ``None`` (default) autodetects in
+            :meth:`load`: ``True`` when the resolved device is CUDA,
+            ``False`` on CPU — matching current (FP32-on-CPU) behaviour.
+        device:
+            Ultralytics device string (e.g. ``"cuda:0"``, ``"cpu"``).
+            ``None`` (default) autodetects in :meth:`load` via
+            ``torch.cuda.is_available()``.
+
+        """
         self._model = None
+        self._imgsz = imgsz
+        self._half = half
+        self._device = device
 
     def load(self, model_path: str) -> None:
         """
-        Load a YOLO model from *model_path*.
+        Load a YOLO model from *model_path* and warm it up.
 
         Raises :class:`RuntimeError` if ``ultralytics`` is not installed.
         """
         try:
             from ultralytics import YOLO  # noqa: PLC0415 (deferred import intentional)
+            import torch  # noqa: PLC0415 (ultralytics dep; free once YOLO is imported)
         except ImportError as exc:
             raise RuntimeError(
                 "ultralytics not installed — pip install ultralytics in the pixi env (Stage 1)"
             ) from exc
         self._model = YOLO(model_path)
+
+        # Resolve device/half once, at load time, rather than per predict()
+        # call. Preserves current behaviour: FP32 unless the resolved device
+        # is CUDA.
+        if self._device is None:
+            self._device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        if self._half is None:
+            self._half = self._device.startswith("cuda")
+
+        # Warm up: the first predict() call triggers CUDA context creation,
+        # kernel JIT and cuDNN autotune, typically 1-5 s on Jetson. Pay that
+        # cost here, at on_configure, instead of inside the first DetectSocks
+        # goal's timeout or the first continuous-mode frame.
+        import numpy as np  # noqa: PLC0415 (deferred; numpy is a hard ultralytics dep)
+
+        dummy = np.zeros((self._imgsz, self._imgsz, 3), dtype=np.uint8)
+        self._model.predict(
+            dummy,
+            imgsz=self._imgsz,
+            half=self._half,
+            device=self._device,
+            verbose=False,
+        )
 
     def infer(self, image_bgr, conf_threshold: float = 0.5) -> list:
         """Run YOLO inference and return a list of :class:`Detection` objects."""
@@ -79,6 +128,9 @@ class UltralyticsBackend(DetectorBackend):
         results = self._model.predict(
             image_bgr,
             conf=conf_threshold,
+            imgsz=self._imgsz,
+            half=self._half,
+            device=self._device,
             verbose=False,
         )
 
@@ -108,7 +160,7 @@ class UltralyticsBackend(DetectorBackend):
         return detections
 
 
-def make_backend(name: str = "ultralytics") -> DetectorBackend:
+def make_backend(name: str = "ultralytics", **kwargs) -> DetectorBackend:
     """
     Create a detector backend by name.
 
@@ -118,6 +170,9 @@ def make_backend(name: str = "ultralytics") -> DetectorBackend:
         ``"ultralytics"`` (Stage 1, PyTorch) is the only currently
         implemented backend.  ``"tensorrt"`` and ``"subprocess"`` are
         reserved for Stage 2/3 (see plan §5).
+    kwargs:
+        Forwarded to the backend constructor (e.g. ``imgsz``, ``half``,
+        ``device`` for ``"ultralytics"``).
 
     Raises
     ------
@@ -128,7 +183,7 @@ def make_backend(name: str = "ultralytics") -> DetectorBackend:
 
     """
     if name == "ultralytics":
-        return UltralyticsBackend()
+        return UltralyticsBackend(**kwargs)
     elif name in ("tensorrt", "subprocess"):
         raise NotImplementedError(
             f"Backend '{name}' is Stage 2/3 — see plan §5. "
