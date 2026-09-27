@@ -59,7 +59,7 @@ class UltralyticsBackend(DetectorBackend):
 
     def load(self, model_path: str) -> None:
         """
-        Load a YOLO model from *model_path*.
+        Load a YOLO model from *model_path* and warm it up.
 
         Raises :class:`RuntimeError` if ``ultralytics`` is not installed.
         """
@@ -70,6 +70,15 @@ class UltralyticsBackend(DetectorBackend):
                 "ultralytics not installed — pip install ultralytics in the pixi env (Stage 1)"
             ) from exc
         self._model = YOLO(model_path)
+
+        # Warm up: the first predict() call triggers CUDA context creation,
+        # kernel JIT and cuDNN autotune, typically 1-5 s on Jetson. Pay that
+        # cost here, at on_configure, instead of inside the first DetectSocks
+        # goal's timeout or the first continuous-mode frame.
+        import numpy as np  # noqa: PLC0415 (deferred; numpy is a hard ultralytics dep)
+
+        dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+        self._model.predict(dummy, verbose=False)
 
     def infer(self, image_bgr, conf_threshold: float = 0.5) -> list:
         """Run YOLO inference and return a list of :class:`Detection` objects."""
