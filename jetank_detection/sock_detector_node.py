@@ -68,7 +68,10 @@ class SockDetectorNode(LifecycleNode):
         self._det_pub = None
         self._debug_pub = None
         self._latest_image = None
-        self._image_lock = threading.Lock()
+        # Condition (not a plain Lock): _store_latest notifies on every new
+        # frame so the action's collect loop can block until one arrives
+        # instead of polling on a timer (see finding jetank_detection-01).
+        self._image_cond = threading.Condition()
         # Hot-path caches (resolved in on_configure): the continuous image
         # callback runs per frame, where a string-keyed get_parameter lookup
         # and a repeated `import cv2` are avoidable constant costs.
@@ -253,9 +256,10 @@ class SockDetectorNode(LifecycleNode):
     # ------------------------------------------------------------------
 
     def _store_latest(self, msg: Image) -> None:
-        """Store the most recent image message under the image lock."""
-        with self._image_lock:
+        """Store the most recent image message and wake any waiting goal."""
+        with self._image_cond:
             self._latest_image = msg
+            self._image_cond.notify_all()
 
     def _continuous_image_callback(self, msg: Image) -> None:
         """Process and publish detections for every incoming frame."""
@@ -360,24 +364,25 @@ class SockDetectorNode(LifecycleNode):
                     goal_handle.canceled()
                     return DetectSocks.Result()
 
-                with self._image_lock:
+                with self._image_cond:
                     current_msg = self._latest_image
-
-                if current_msg is None:
-                    time.sleep(0.01)
-                    continue
-
-                # Deduplicate: skip if we already processed this stamp
-                stamp = (current_msg.header.stamp.sec, current_msg.header.stamp.nanosec)
-                if stamp == last_stamp:
-                    time.sleep(0.01)
-                    continue
-
-                last_stamp = stamp
-
-                if self._backend is None:
-                    time.sleep(0.01)
-                    continue
+                    stamp = (
+                        (current_msg.header.stamp.sec, current_msg.header.stamp.nanosec)
+                        if current_msg is not None
+                        else None
+                    )
+                    have_new_frame = current_msg is not None and stamp != last_stamp
+                    if not have_new_frame or self._backend is None:
+                        # Block until _store_latest notifies a new frame
+                        # instead of busy-polling every 10 ms. Cap the wait
+                        # so cancellation and the goal deadline are still
+                        # checked several times a second even if no frame
+                        # ever arrives (was: three separate
+                        # time.sleep(0.01) branches doing this same check).
+                        remaining = deadline - time.monotonic()
+                        self._image_cond.wait(timeout=max(0.0, min(remaining, 0.5)))
+                        continue
+                    last_stamp = stamp
 
                 try:
                     image_bgr = self._bridge.imgmsg_to_cv2(
